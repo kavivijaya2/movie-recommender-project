@@ -1,101 +1,43 @@
 
-import os
-import io
-import zipfile
-import requests
-import pandas as pd
 import streamlit as st
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+import joblib
+import nltk, re
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
 
-MOVIELENS_ZIP_URL = "https://files.grouplens.org/datasets/movielens/ml-latest-small.zip"
-LOCAL_MOVIES = "movies.csv"
+nltk.download('stopwords')
+STOPWORDS = set(stopwords.words('english'))
+ps = PorterStemmer()
 
-@st.cache_data(show_spinner=True)
-def load_movies_df():
-    """
-    Returns a pandas DataFrame of movies with columns: movieId, title, genres.
-    If movies.csv isn't present, downloads MovieLens small and extracts it.
-    """
-    if os.path.exists(LOCAL_MOVIES):
-        return pd.read_csv(LOCAL_MOVIES)
+def basic_clean(text):
+    if not isinstance(text, str):
+        return ""
+    t = re.sub(r"[^a-zA-Z0-9\s]", " ", text)
+    t = re.sub(r"\s+", " ", t).strip().lower()
+    return t
 
-    # Download the MovieLens small zip
-    resp = requests.get(MOVIELENS_ZIP_URL, timeout=60)
-    resp.raise_for_status()
-    with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
-        with zf.open("ml-latest-small/movies.csv") as f:
-            df = pd.read_csv(f)
-    # Save for subsequent runs (and faster caching)
-    df.to_csv(LOCAL_MOVIES, index=False)
-    return df
+def preprocess_for_vectorizer(text):
+    t = basic_clean(text)
+    tokens = [w for w in t.split() if w not in STOPWORDS and len(w) > 2]
+    # tokens = [ps.stem(w) for w in tokens]  # optional
+    return " ".join(tokens)
 
-@st.cache_data(show_spinner=False)
-def build_similarity(df: pd.DataFrame):
-    """
-    Build the content-based similarity matrix from movie genres.
-    Returns (vectorizer, cosine_sim matrix).
-    """
-    df = df.copy()
-    df["genres"] = df["genres"].fillna("").str.replace("|", " ", regex=False)
-    cv = CountVectorizer(max_features=5000, stop_words="english")
-    matrix = cv.fit_transform(df["genres"])
-    sim = cosine_similarity(matrix)
-    return cv, sim
+@st.cache_resource
+def load_pipeline():
+    return joblib.load("model_logreg.pkl")
 
-def recommend(title: str, df: pd.DataFrame, sim_matrix, top_n: int = 5):
-    if title not in df["title"].values:
-        return []
-    idx = df.index[df["title"] == title][0]
-    scores = list(enumerate(sim_matrix[idx]))
-    scores = sorted(scores, key=lambda x: x[1], reverse=True)
-    picks = [df.iloc[i[0]].title for i in scores[1 : top_n + 1]]
-    return picks
+st.set_page_config(page_title="Fake News Classifier", page_icon="📰")
+st.title("📰 Fake News Classifier")
+st.write("Paste a news **headline or paragraph** and get a prediction: **FAKE** or **REAL**.")
 
-# --------------- UI ---------------
-st.set_page_config(page_title="Movie Recommender", page_icon="🎬")
-
-st.title("🎬 Movie Recommendation System")
-st.caption("Content-based filtering using MovieLens (genres with CountVectorizer + cosine similarity).")
-
-with st.spinner("Loading dataset..."):
-    movies_df = load_movies_df()
-
-_, sim_matrix = build_similarity(movies_df)
-
-# Search + select UI
-query = st.text_input("Search a movie title (optional):")
-titles = movies_df["title"].tolist()
-if query:
-    filtered = [t for t in titles if query.lower() in t.lower()]
-    if not filtered:
-        st.info("No titles matched your search. Showing full list.")
-        filtered = titles
-else:
-    filtered = titles
-
-selected = st.selectbox("Choose a movie you like:", filtered, index=0 if filtered else None)
-top_n = st.slider("How many recommendations?", 3, 15, 5)
-
-if st.button("Recommend"):
-    if not selected:
-        st.warning("Please select a movie title.")
+user_input = st.text_area("Enter news text:", height=200, placeholder="Type or paste news content here...")
+if st.button("Predict"):
+    if not user_input.strip():
+        st.warning("Please enter some text.")
     else:
-        recs = recommend(selected, movies_df, sim_matrix, top_n=top_n)
-        if not recs:
-            st.error("Selected movie not found in database.")
-        else:
-            st.subheader("Top Recommendations")
-            for i, m in enumerate(recs, 1):
-                st.write(f"{i}. {m}")
-
-with st.expander("What is this doing?"):
-    st.markdown(
-        """
-        **Method:** Content-based filtering using genres.
-        1. Load MovieLens *small* dataset (automatically downloaded on first run).
-        2. Convert genre strings to a bag‑of‑words representation using `CountVectorizer`.
-        3. Compute cosine similarity between all movies.
-        4. For the selected movie, return the top‑N most similar titles.
-        """
-    )
+        pipe = load_pipeline()
+        cleaned = preprocess_for_vectorizer(user_input)
+        pred = pipe.predict([cleaned])[0]
+        label = "REAL ✅" if pred==1 else "FAKE ❌"
+        st.subheader(f"Prediction: {label}")
+        st.caption("Model: TF‑IDF + Logistic Regression")
